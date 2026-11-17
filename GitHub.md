@@ -6,7 +6,7 @@ Git is an open-source version control system, version control is a software prac
 
 [https://www.atlassian.com/git/tutorials/install-git](https://www.atlassian.com/git/tutorials/install-git)
 
-## Important Terms
+## Important Termiology
 
 - **Directory:** Folder
 - **Terminal or Command Line:** Interface for text commands
