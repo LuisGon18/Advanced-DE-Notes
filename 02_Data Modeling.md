@@ -258,6 +258,58 @@ In Olist, orders and products are related through `order_items`:
 
 `customers` and `geolocation` both have a zip code prefix, but neither table has one row per zip. Joining them on it turns 99,441 customers into 15,083,455 rows (a fan-out of about 150×).
 
+The columns are `customer_zip_code_prefix` and `geolocation_zip_code_prefix` (the first 5 digits of a Brazilian postal code). The join matches every customer in a zip with every geolocation row for that zip. Example, zip `01012`:
+
+- **customers :** 3 rows (3 customers live there).
+- **geolocation :** 17 rows (17 GPS points inside that zip).
+- **Join :** 3 × 17 = **51 rows** for 3 customers.
+
+There's no error. The query runs, but counts and sums come out silently wrong.
+
+#### Grain
+
+The **grain** is what one row of a table represents.
+
+- **customers :** One row per customer (`customer_id`).
+- **geolocation :** One row per GPS point, **not** per zip (1,000,163 rows, but only 19,015 different zips).
+
+To find it, guess ("one row per zip?") and test the guess with check 0. Grain is about **one** table and cardinality is about **two**, but the grain decides the cardinality: if the join column is unique in one table, the join is one-to-many and safe.
+
+#### Checking A Join Step By Step
+
+**1. Draw what you expect.** Use the business meaning. Example: `customer }|--|| location`, many customers live in one location.
+
+**2. Check that the "one" side really is one.** Run check 0 on the parent's join column (here, the zip in geolocation). It fails: zip `01012` has 17 rows, not 1.
+
+**3. If it isn't, ask whether it's really "many" in real life.**
+
+| **Is it really many?** | **Then it's...** | **Fix** |
+|-- | -- | -- |
+| **Yes** | A true many-to-many. Example: students ↔ courses | An associative table (`enrollments`) |
+| **No**, just repeats or measurements of the same thing | A grain problem | `GROUP BY` the table to the grain you need |
+
+Geolocation is a **fake many**: one zip is one area, and the 17 rows are GPS points inside it. An associative table would keep all 17 links, so it would still give 51 rows. Collapse it instead:
+
+```sql
+CREATE TABLE geo_by_zip AS
+SELECT geolocation_zip_code_prefix AS zip_code_prefix,
+       AVG(geolocation_lat)        AS lat,
+       AVG(geolocation_lng)        AS lng
+FROM geolocation
+GROUP BY geolocation_zip_code_prefix;
+```
+
+**4. Check again.** A fix you haven't checked is just a guess.
+
+- **The "one" side is one now :** `geo_by_zip` has 19,015 rows and 19,015 different zips.
+- **The join keeps the right row count :** `customers LEFT JOIN geo_by_zip` gives 99,441 rows, the same as `customers` alone.
+
+#### Reading The Row Count After A Join
+
+- **More rows than expected :** Fan-out. The "one" side isn't one.
+- **Fewer rows than expected :** Rows were lost. An inner join drops children that have no match (the orphans from check 3b). Example: `customers JOIN geo_by_zip` gives 99,163 rows, because 278 customers have a zip that isn't in geolocation.
+- **Same count :** The join is safe.
+
 #### Rule Of Thumb Before Any Join
 
 Run check 0 (key uniqueness) on the join column of **both** tables:
