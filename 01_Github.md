@@ -179,3 +179,7 @@ If a mistake is made, system or human, you can use ```reset HEAD~1``` this tells
 ## Forking
 
 This makes a complete copy of a repository, this is useful to copy other people's repos, where you don't have any access to make changes on the original.
+
+## Resources
+
+- [Git and GitHub for Beginners - Crash Course](https://www.youtube.com/watch?v=RGOj5yH7evk)
