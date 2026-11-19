@@ -48,42 +48,38 @@ Constraints are rules the database enforces on every insert and update:
 
 ### Creating Tables (DDL)
 
-The teacher/student example from the cardinality section, as a physical model:
-
 ```sql
-CREATE TABLE teachers (
-    teacher_id  INTEGER        PRIMARY KEY,
-    name        VARCHAR(100)   NOT NULL,
-    email       VARCHAR(255)   UNIQUE              -- candidate key
+-- Parent table
+CREATE TABLE customers (
+    customer_id   VARCHAR(32) PRIMARY KEY,
+    customer_city VARCHAR(100)
 );
 
-CREATE TABLE students (
-    student_id  INTEGER        PRIMARY KEY,
-    name        VARCHAR(100)   NOT NULL,
-    teacher_id  INTEGER        NOT NULL REFERENCES teachers (teacher_id),  -- every student has exactly one teacher
-    enrolled_on DATE,
-    fees_paid   DECIMAL(10, 2) CHECK (fees_paid >= 0)
+-- Pattern 1: FK is just a reference; the table has its own PK
+CREATE TABLE orders (
+    order_id     VARCHAR(32) PRIMARY KEY,
+    customer_id  VARCHAR(32) NOT NULL,
+    order_status VARCHAR(20),
+    FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
 );
 
-CREATE TABLE courses (
-    course_id   INTEGER        PRIMARY KEY,
-    title       VARCHAR(100)   NOT NULL
+-- Pattern 2: FK is part of a composite PK (one-to-many)
+CREATE TABLE order_items (
+    order_id      VARCHAR(32),
+    order_item_id INT,
+    price         DECIMAL(10,2),
+    PRIMARY KEY (order_id, order_item_id),
+    FOREIGN KEY (order_id) REFERENCES orders (order_id)
 );
 
-CREATE TABLE enrollments (                         -- associative entity: students ↔ courses (many-to-many)
-    student_id  INTEGER        NOT NULL REFERENCES students (student_id),
-    course_id   INTEGER        NOT NULL REFERENCES courses (course_id),
-    enrolled_on DATE,
-    PRIMARY KEY (student_id, course_id)            -- composite key
+-- Pattern 3: FK is the entire PK (one-to-one)
+CREATE TABLE customer_details (
+    customer_id  VARCHAR(32),
+    loyalty_tier VARCHAR(20),
+    PRIMARY KEY (customer_id),
+    FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
 );
 ```
-
-How the constraints carry the cardinality:
-
-- **Foreign key + NOT NULL :** The child must have a parent (mandatory, minimum 1).
-- **Foreign key without NOT NULL :** The child may have no parent (optional, minimum 0).
-- **Foreign key + UNIQUE :** Each parent has at most one child (one-to-one).
-- **"A parent must have at least one child" :** A simple constraint can't enforce this ("teachers must have at least one student"). It has to be checked by the application or by a test, like profiling check 2.
 
 ### Functional Dependency
 
@@ -318,7 +314,93 @@ Run check 0 (key uniqueness) on the join column of **both** tables:
 - **Unique on both sides :** One-to-one.
 - **Unique on neither :** Many-to-many. Join through an associative table, or deduplicate or aggregate one side first.
 
+## OLAP vs OLTP
+
+- **OLTP (Online Transaction Processing) :** Designed to handle large volumes of short, real-time transactions, such as payments, bookings and banking operations, using fast, ACID-compliant databases to ensure accuracy and consistency.
+  - **Key Characteristics :**
+     - **Row-based storage** optimized for reading and writing individual records
+     - **ACID compliance** ensuring data integrity across concurrent transactions
+     - **Normalized data models** that minimize redundancy
+     - **Low latency**
+     - **Real-time data freshness** used by applications and end users
+- **OLAP (Online Analytical Processing) :** Enables fast, multidimensional analysis of large datasets to support business intelligence.
+  - **Key Characteristics :**
+     - **Columnar storage** optimized for aggregations and scans
+     - **Read-heavy workloads**
+     - **Denormalized or dimensional models (star or snowflake schema)** intentionally introducing redundancy for fast retrievals.
+     - **Support for complex joins**
+     - **Near-real-time to batch data freshness** used by data analysts and scientists.
+
+Every modern organization uses the two different types of database workloads; in the real world, it's not a matter of choosing one, it's knowing when to use each.
+
+### ACID
+
+**ACID :** Atomicity, Consistency, Isolation, Durability.
+
+- **Atomicity :** All or nothing; a transaction is accepted if everything that it needs to do happens.
+- **Consistency :** All rules and constraints must be satisfied for data to be committed.
+- **Isolation :** Transactions do not interfere with each other.
+- **Durability :** Once a transaction is committed, its changes are permanent, even after crashes.
+
+This is important because it ensures data integrity and protects from hardware failures, software bugs and concurrency issues.
+
+## SQL Indexes
+
+SQL indexes are special data structures that speed up data retrieval by letting the database jump directly to matching rows instead of scanning the entire table, improving query performance.
+
+### Main Types Of SQL Indexes
+
+- **Clustered Indexes :** Implements a B-tree structure, with a root node at the top, connected to an intermediate level or levels, and data pages or leaf nodes. Each of these nodes contains index rows, and the B-tree has a series of pointers that help the query engine jump and directly find the matching rows. Primary keys are by default clustered indexes.
+- **Nonclustered Indexes :** Instead of index rows, the root node and intermediate level or levels contain key values, and the data pages or leaf nodes contain row locators, usually a table with `<Nonclustered Index>` and `<Clustered Index>`, so behind the scenes the query first looks at the tree to find the row locator and then looks at the clustered index tree with the locator.
+
+#### Clustered And Nonclustered Index Basic SQL Creation Statement Syntax (SQL Server)
+
+```sql
+CREATE CLUSTERED INDEX IX_Table_Column
+ON dbo.YourTable(YourColumn);
+
+
+CREATE NONCLUSTERED INDEX index_name
+ON table_name (column1 [ASC|DESC], column2 [ASC|DESC]);
+```
+
+**Note :** `CLUSTERED` / `NONCLUSTERED` and the `dbo.` schema are SQL Server syntax. DuckDB and PostgreSQL have no clustered indexes and use plain `CREATE INDEX`:
+
+```sql
+CREATE INDEX idx_orders_customer_id ON orders (customer_id);
+```
+
+### What Indexes Cost
+
+- **Storage :** Every index is an extra structure with a copy of the indexed columns plus pointers, kept on disk and in memory.
+- **Slower writes :** Every `INSERT`, `UPDATE` and `DELETE` must also update every index on the table. This is usually the bigger cost.
+
+That's why write-heavy OLTP databases create only the indexes their key queries need (the same rule as in the MongoDB index notes).
+
+### How OLAP Systems Do It Instead (BigQuery, Databricks)
+
+A B-tree is built to jump to a few rows. OLAP queries scan and aggregate millions of rows, so warehouses and lakehouses mostly don't rely on B-tree indexes. Instead they cut down **how much data is read**:
+
+- **Columnar storage :** Only the columns the query uses are read, and similar values in a column compress well.
+- **Partitioning :** The table is split by a column (usually a date). A query that filters on that column skips whole partitions.
+- **Clustering :** Data is sorted by chosen columns, and each block or file keeps metadata such as min/max values. A query that filters on those columns skips the blocks or files that can't match.
+
+| | **BigQuery** | **Databricks (Delta Lake)** |
+|-- | -- | -- |
+| **Columnar storage** | Internal columnar format | Parquet files |
+| **Partitioning** | Partitioned tables (by date, timestamp or integer range) | Supported, but liquid clustering replaces it for new tables |
+| **Clustering** | Clustered tables: sorts storage blocks by up to 4 columns, then prunes blocks | Liquid clustering, recommended for all new tables |
+| **Skipping** | Block pruning using block metadata | Data skipping using per-file min/max statistics, collected automatically on write |
+| **Why it matters** | On-demand pricing charges for bytes scanned, so less data read = lower cost | Less data read = faster queries and less compute |
+
+**Watch out :** BigQuery "clustering" (sorting storage blocks so they can be skipped) is a different thing from a **clustered index** (a B-tree whose leaf level holds the table's rows), despite the similar name.
+
 ## Resources
 - [Database Cardinality Explained in 12 Minutes!](https://www.youtube.com/watch?v=PNCfDV2EL_o)
 - [Entity Relationship Diagrams](https://www.youtube.com/watch?v=LowjDtiNlk4&t=1087s)
 - [Entity Relationship Diagrams In Mermaid](https://mermaid.js.org/syntax/entityRelationshipDiagram.html)
+- [What is the difference between OLTP and OLAP?](https://answers.databricks.com/oltp-vs-olap-differences-use-cases)
+- [How do SQL Indexes Work](https://www.youtube.com/watch?v=YuRO9-rOgv4)
+- [BigQuery: Introduction to clustered tables](https://cloud.google.com/bigquery/docs/clustered-tables)
+- [Databricks: Use liquid clustering for tables](https://docs.databricks.com/gcp/en/delta/clustering)
+- [Databricks: Data skipping](https://docs.databricks.com/gcp/en/delta/data-skipping)
