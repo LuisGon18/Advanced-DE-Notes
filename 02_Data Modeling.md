@@ -4,10 +4,10 @@ Data modeling is the practice of designing how data is structured and related, s
 
 ## Important Terminology
 
-- **Entities :** Objects or concepts represented in the data, such as customer, products or orders.
+- **Entities :** Objects or concepts represented in the data, such as customers, products or orders.
 - **Attributes :** Properties or characteristics of entities, like a customer's name, email...
-- **Relationships :** Connections between entities, for example, a customer "places" an order
-- **Business Rules :** Constraints and logic that govern how data is used and related
+- **Relationships :** Connections between entities, for example, a customer "places" an order.
+- **Business Rules :** Constraints and logic that govern how data is used and related.
 
 ## Relational Database Basics
 
@@ -90,25 +90,136 @@ CREATE TABLE customer_details (
 
 Redundancy appears when a column depends on something other than the key. If `order_items` also stored `product_category_name`, the same category would repeat on every item of that product, and the copies could disagree. Normal forms are rules about which dependencies are allowed (Week 1, item 3).
 
+## Normalization
+
+Structuring a database in such a way that it can't express redundant information, making the tables easy to understand, easier to enhance and extend, and protected from insertion, update and deletion anomalies.
+
+### Attribute Dependencies
+
+In **A → B**, A is the **determinant** and B the **dependent**. A **prime** attribute is part of a candidate key; a **non-prime** attribute isn't.
+
+| **Dependency** | **Notation** | **Meaning** | **Example** | **Removed by** |
+|-- | -- | -- | -- | -- |
+| **Functional** | `A → B` | Each A has exactly one B | `order_id → order_status` | — |
+| **Trivial** | `A → B`, B is part of A | Always true, says nothing new | `(order_id, order_item_id) → order_id` | — (always allowed) |
+| **Full** | `(A, B) → C`, but neither A nor B alone → C | C needs the whole key | `(order_id, order_item_id) → price` | — (the goal) |
+| **Partial** | `(A, B) → C`, and A → C | A non-prime column depends on part of a composite key | `order_id → order_status`, if `order_items` stored it | 2NF |
+| **Transitive** | `A → B → C` | A non-prime column depends on the key through another non-prime column | `customer_id → zip_prefix → city` | 3NF |
+| **Multivalued** | `A ↠ B` (or `A ->> B`) | Each A has a set of Bs, independent of the other columns | `employee ↠ skill` and `employee ↠ language` in one table | 4NF |
+| **Join** | `*(R1, R2, R3)` | The table equals the join of 3+ of its smaller tables, but not of 2 | `(supplier, part, project)` rebuilt from its 3 pairs | 5NF |
+
+### First Normal Form (1NF)
+
+Rules:
+- Using row order to convey information is not permitted
+- All values in the column must be of the same data type
+- All tables must have primary keys
+- Repeating groups or multi-valued attributes are not permitted
+
+### Second Normal Form (2NF)
+
+Requires the table to be in 1NF and to have no partial dependencies, meaning every non-prime attribute must depend on the entire candidate key, not just part of it.
+
+### Third Normal Form (3NF)
+
+Requires the table to be in 2NF and contain no transitive dependencies, meaning every non-prime attribute must depend directly and only on a candidate key.
+
+### Boyce-Codd Normal Form (BCNF)
+
+A slightly stricter version of 3NF, sometimes called 3.5NF. Requires the table to be in 3NF, and the left side of every non-trivial dependency must be a **superkey** (a candidate key, or a column set that contains one).
+
+- **3NF vs BCNF :** 3NF limits only **non-prime** attributes; BCNF applies to **every** attribute, including prime ones. Every BCNF table is in 3NF, but not the other way around.
+- **When they differ :** Only when a prime attribute depends on something that isn't a key. That needs two overlapping composite candidate keys, so it's rare.
+- **Example :** In `(student, course, teacher)`, each teacher teaches one course, so `teacher → course`. The candidate keys are `(student, course)` and `(student, teacher)`. It passes 3NF (every column is prime) but fails BCNF (`teacher` isn't a key), so a teacher's course repeats on every student row. Fix: split it into `(teacher, course)` and `(student, teacher)`.
+
+### Fourth Normal Form (4NF)
+
+Requires the table to be in BCNF and states that the only kinds of multivalued dependency allowed in a table are multivalued dependencies on the key.
+
+### Fifth Normal Form (5NF)
+
+Requires the table to be in 4NF and requires it to not be describable as the logical result of joining some other tables together.
+
+## Deliberate Denormalization
+
+Breaking normal forms **on purpose** so reads can skip joins: the same fact is stored in more than one place, or tables are pre-joined. "Deliberate" means you know which rule you break and why, and the copies are kept in sync, usually by a pipeline that rebuilds the table from the normalized source.
+
+- **Why OLAP can afford it :** The pipeline is the only writer, so the update anomalies normalization protects against can't happen. And at warehouse scale, joins are the expensive part.
+- **Columnar storage isn't denormalization :** It's how data is stored, not how tables are designed. But it removes most of the cost: repeated values compress well, and a query reads only the columns it uses.
+- **OLTP does it too, in small doses :** Example: storing `order_total` on the order. The application keeps the copy in sync.
+
+| **Technique** | **Olist example** | **Breaks** |
+|-- | -- | -- |
+| **Denormalized dimension** | `dim_product` holds the English category name | 3NF: `product_id → category → category_english` |
+| **Wide table (One Big Table)** | `order_items` pre-joined with orders, customers and products | 2NF: `order_status` depends only on `order_id` |
+| **Nested / repeated fields** | One row per order, with its items in an array (BigQuery's recommended way to denormalize) | 1NF: a repeating group |
+| **Pre-aggregated table** | Daily revenue per category | Stores data that can be recalculated |
+
+### The Grain Rule
+
+Everything in a table must be at the table's grain, or aggregated to it before it's joined in. Example: payments are at the order grain, so joining them to an item-level wide table gives 3 items × 2 payments = 6 rows, and sums count twice.
+
+- **Change the table's grain to the order :** Items have to be aggregated too, so questions by product or category are lost.
+- **Aggregate payments to the order, then join :** The grain stays at the item, but `total_paid` repeats on every item of its order, so it can't be summed across rows.
+- **One table per grain :** `fact_order_items` and `fact_orders`. This is the star schema answer.
+
+### Star Schema
+
+- **Fact table :** One row per business event at a declared grain, holding foreign keys and **measures** (the numbers you sum). Example: `fact_order_items`, with `price` and `freight_value`.
+- **Dimension table :** The context of the event: who, what, where, when. Descriptive columns you filter and group by. Example: `dim_customer`, `dim_product`, `dim_seller`, `dim_date`.
+- **Shape :** The fact in the centre, every dimension one join away. Dimensions are denormalized: `dim_product` holds the English category name, `dim_customer` holds city and state.
+
+```
+dim_customer ||--o{ fact_order_items
+dim_product  ||--o{ fact_order_items
+dim_seller   ||--o{ fact_order_items
+dim_date     ||--o{ fact_order_items
+```
+
+### Snowflake Schema
+
+A star schema whose dimensions are normalized into sub-dimensions, so the diagram branches out like a snowflake. Example: categories move out of `dim_product` into `dim_category`, and city and state move to a `dim_geography` by zip prefix, shared by customers and sellers (if `zip → city, state` holds, see Where Shared Attributes Live).
+
+```
+dim_category  ||--o{ dim_product
+dim_product   ||--o{ fact_order_items
+dim_geography ||--o{ dim_customer
+dim_geography ||--o{ dim_seller
+dim_customer  ||--o{ fact_order_items
+dim_seller    ||--o{ fact_order_items
+```
+
+### Star vs Snowflake
+
+| | **Star** | **Snowflake** |
+|-- | -- | -- |
+| **Dimensions** | Denormalized (break 3NF) | Normalized (usually 3NF) |
+| **Joins per query** | One per dimension | More: dimension → sub-dimension |
+| **Redundancy** | More, but cheap in columnar storage | Less |
+| **SQL** | Simpler and faster | More joins, more complex |
+| **Use when** | The default for analytics and BI | A sub-dimension is large or shared, like geography for customers and sellers |
+
+The fact table is the same in both; only the dimensions change.
+
 ## Phases In Data Modeling
 
 - **Conceptual Data Model :** Highly abstract representation of entities and their relationships
-- **Logical Data Model :** Detailed Representations of the data structure, including entities, attributes and relationships and their cardinality, independent of any specific database system
+- **Logical Data Model :** Detailed representation of the data structure, including entities, attributes and relationships and their cardinality, independent of any specific database system
 - **Physical Data Model :** Detailed blueprint of how data is stored in a specific database system
 
 ## Cardinality
 
-Cardinality dictates how many of one entity can relate to another, and whether the relationship is optional. The relationships between entities can also be represented by functions
+Cardinality dictates how many of one entity can relate to another, and whether the relationship is optional. The relationships between entities can also be represented by functions.
 
 ### Types Of Functions In Relationships
 
 - **Injective Function :** Every member of set **a** has its own unique matching member in set **b**.
 - **Surjective Function :** Every member of set **b** has at least one matching member in set **a**.
-- **Bijective Function :** Injective + Surjective, so a true one to one relationship.
+- **Bijective Function :** Injective + Surjective, so a true one-to-one relationship.
 
 ### Determining Cardinality
 
-When determining the nature of a relationship we have to ask ourselves three important questions:
+When determining the nature of a relationship, we have to ask ourselves three important questions:
 
 - **Degree :** How many sets (entities) are participating?
 - **Participation :** What is the **minimum** number of relationships in which an entity can participate?
@@ -120,9 +231,9 @@ With these 3 questions answered, we can use crow's foot notation to represent th
 
 <img src="assets/advanced-data-engineering/media/crown.png" style="width:5in;height:2in" />
 
-#### Example of determining cardinality based on a business requirement:
+#### Example Of Determining Cardinality Based On A Business Requirement
 
-- **Requirement :** Every Student has exactly one teacher, and teachers can have many students, but must have at least one.
+- **Requirement :** Every student has exactly one teacher, and teachers can have many students, but must have at least one.
 
 We first answer the Degree, Participation and Cardinality Ratio questions for both entities:
 
@@ -131,19 +242,74 @@ We first answer the Degree, Participation and Cardinality Ratio questions for bo
 | **Student** | 2 | 1 | 1 |
 | **Teacher** | 2 | 1 | Many |
 
-To define the relationship we look at the maximums, or cardinality ratio of each side, this example is defined as one-to-many, or many-to-one relationship.
+To define the relationship, we look at the maximums, or cardinality ratio, of each side. This example is defined as a one-to-many, or many-to-one, relationship.
 
-And we use crow's notation to represent first the participation (inside) and then the cardinality ratio (outside) 
+And we use crow's foot notation to represent first the participation (inside) and then the cardinality ratio (outside).
 
 <img src="assets/advanced-data-engineering/media/1m.png" style="width:6in;height:1.8in" />  
 
-**Note :** Many to many relationships conceptually can be represented as:
+**Note :** Many-to-many relationships conceptually can be represented as:
 
 <img src="assets/advanced-data-engineering/media/mm.png" style="width:6in;height:2.5in" />
 
-But logically, in actual databases, many to many relationships are considered poor design and it's a huge resource drain in the database, because of this we would actually build an associative entity between them, its attributes being the primary keys for each entity they relate, like so: 
+But logically, in actual databases, many-to-many relationships are considered poor design and they're a huge resource drain in the database. Because of this, we would actually build an associative entity between them, its attributes being the primary keys of each entity it relates, like so:
 
 <img src="assets/advanced-data-engineering/media/ae.png" style="width:8in;height:2.3in" />
+
+#### Junction vs Parent Tables
+
+Not every many-to-many needs an associative table. First ask whether the many-to-many is **real** or **fake**.
+
+| | **Junction table** (associative, bridge) | **Parent table** |
+|-- | -- | -- |
+| **Fixes** | A **real** many-to-many: both sides really are many in the business | A **fake** many-to-many: two tables share a value that is unique in neither |
+| **One row is** | One pairing, a real business fact, often with its own columns | One value of the shared column, which becomes its primary key |
+| **Position** | The child of both tables (the "many" side of both) | The parent of both tables (the "one" side of both) |
+| **Crow's foot** | `A \|\|--o{ J }o--\|\| B` | `A }o--\|\| P \|\|--o{ B` |
+| **Olist example** | `order_items` between orders and products: "this order has this product, at this price" | A zip prefix table between customers and sellers (see below) |
+
+**The fake many-to-many in Olist :** customers and sellers both have a zip prefix, and it's unique in neither. Joined on it, zip `01123` gives 6 customers × 3 sellers = 18 rows, but no customer–seller pair is a real fact; they just share an area. A zip prefix table, with one row per zip, turns it into two honest one-to-many relationships: `customers }o--|| zip_prefix ||--o{ sellers`.
+
+A parent table with only one child is the ordinary one-to-many. Example: `product_category_name_translation`. The category name is unique there (71 rows, 71 names), and many products point to one category.
+
+**The test :** Can one row of the would-be junction record a real fact about one pairing?
+
+- **Yes :** Junction table. "This order contains this product" is a real fact.
+- **No :** Parent table. "Customer X is at GPS point Y" can't be known: a customer has a zip, not a point, so every row would be invented.
+
+**Parent tables and 3NF :** Columns that depend on the shared value, not on the table's own key, move to the parent. Example: if `zip_prefix → city, state` holds, customers has `customer_id → zip_prefix → city, state`, a **transitive dependency**, so city and state belong in a zip prefix table. Test the dependency first (see Functional Dependency).
+
+The source data often doesn't have the parent table yet. You build it, like `geo_by_zip` in "Checking A Join Step By Step", which collapses geolocation to one row per zip.
+
+#### Connecting More Than Two Tables
+
+Both fixes can connect any number of tables.
+
+- **Parent tables :** A parent can have any number of children. In Olist, a zip prefix table would be the parent of customers, sellers **and** geolocation. Geolocation isn't the parent: it has many GPS points per zip, so it's a third child.
+
+  ```
+  customers   }o--|| zip_prefix
+  sellers     }o--|| zip_prefix
+  zip_prefix  ||--o{ geolocation
+  ```
+
+- **Junction tables :** A junction can link more than two entities. The number of entities in a relationship is its **degree** (see Determining Cardinality): 2 is **binary**, 3 is **ternary**. `order_items` is ternary: each row links an order, a product **and** a seller ("this order has this product, sold by this seller").
+
+#### Where Shared Attributes Live: The Data Decides
+
+Customers, sellers and geolocation all store city and state next to the zip. Whether they move to the zip prefix parent isn't a modeling choice: it depends on a fact in the data, so profile first and then design.
+
+| **If profiling shows...** | **Then city and state depend on...** | **So they live in...** |
+|-- | -- | -- |
+| Every zip has exactly **one** city and state | The zip | The **parent**; remove them from all three children |
+| Some zips have **several** cities (a zip spans a city border) | Something finer than the zip: the address or the point | The **children**; the parent doesn't hold them |
+| *Almost* one, with a few exceptions | Decide whether the exceptions are real or dirty data | It depends on what you find |
+
+**A parent connects, but it doesn't always locate :** A parent holding only the zip makes the joins safe, but `customer → zip_prefix → geolocation` still returns every GPS point in the zip (17 for zip `01012`), not one location.
+
+- **The limit is the data :** Olist gives each customer's zip prefix, never their address. The most precise answer possible is "somewhere in zip `01012`". No model can create precision the source doesn't have.
+- **To get one location per customer, reduce the points to one :** Average them into the zip's centre point, either at query time or by storing `avg_lat` and `avg_lng` in the parent (like `geo_by_zip`). One average per zip is always true, whatever the city/state test shows.
+- **Resulting parent :** `zip_prefix` (PK), `avg_lat`, `avg_lng`, plus city and state only if `zip → city, state` holds.
 
 ## ERD (Entity Relationship Diagrams)
 
@@ -404,3 +570,4 @@ A B-tree is built to jump to a few rows. OLAP queries scan and aggregate million
 - [BigQuery: Introduction to clustered tables](https://cloud.google.com/bigquery/docs/clustered-tables)
 - [Databricks: Use liquid clustering for tables](https://docs.databricks.com/gcp/en/delta/clustering)
 - [Databricks: Data skipping](https://docs.databricks.com/gcp/en/delta/data-skipping)
+- [Learn Database Normalization - 1NF, 2NF, 3NF, 4NF, 5NF](https://www.youtube.com/watch?v=GFQaEYEc8_8)
